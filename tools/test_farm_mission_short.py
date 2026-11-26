@@ -22,6 +22,7 @@ from nav_msgs.msg import Odometry
 from std_msgs.msg import Float32MultiArray
 from rclpy.action import ActionClient
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.parameter import Parameter
 
 from farm_mission_interfaces.action import ExecuteMission, PlanMission
 from route_planning import load_farm_map
@@ -97,9 +98,14 @@ def save_plan_view(output, route, rows, farm, rear_axle_x=None,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--route-number", type=int, choices=(1, 2, 3), default=1)
+    parser.add_argument("--route-number", type=int, choices=(1, 2, 3, 4), default=1)
+    parser.add_argument("--route-path", type=Path,
+                        help="saved route JSON to inject or compare instead of short_route_N.json")
     parser.add_argument("--max-wall-seconds", type=float, default=600.0)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--farm", type=Path,
+                        default=Path("debug_out/farms/farm_seed_1_120m2_depot"),
+                        help="farm bundle used by the mission stack and plan-view orthophoto")
     parser.add_argument("--plot-only", action="store_true")
     parser.add_argument("--base-link-reference", choices=("rear_axle", "rigid_origin"),
                         default="rear_axle")
@@ -107,10 +113,11 @@ def main():
     output = args.output_dir or Path("debug_out/farm_mission_short" if args.route_number == 1 else
                                      f"debug_out/farm_mission_short_route_{args.route_number}")
     output.mkdir(parents=True, exist_ok=True)
-    route = load_route_json(f"debug_out/routes/short/short_route_{args.route_number}.json")
-    farm = load_farm_map("debug_out/farms/farm_seed_1_120m2_depot/gis")
+    route = load_route_json(args.route_path or
+                            f"debug_out/routes/short/short_route_{args.route_number}.json")
+    farm = load_farm_map(str(args.farm / "gis"))
     tractor_config = load_tractor_config(
-        "configs/tractor_route_2m.yaml" if args.route_number == 2
+        "configs/tractor_route_2m.yaml" if args.route_number in (2, 4)
         else "configs/tractor_default.yaml")
     if args.plot_only:
         with (output / "velocity.csv").open(newline="") as stream:
@@ -121,7 +128,8 @@ def main():
         return
     start, end = route.task.start, route.task.end
     rclpy.init()
-    node = rclpy.create_node(f"farm_mission_short_{args.route_number}_trial")
+    node = rclpy.create_node(f"farm_mission_short_{args.route_number}_trial",
+                             parameter_overrides=[Parameter("use_sim_time", value=True)])
     state = {"cmd": 0.0, "cmd_yaw_rate": 0.0, "speed": math.nan,
              "lateral_speed": math.nan, "yaw_rate": math.nan,
              "steer_norm": math.nan, "x": math.nan, "y": math.nan,
@@ -176,27 +184,31 @@ def main():
               "reversal_stations_m": [station for station, _ in route_reversals(route)]}
     handle = None
     try:
-        if not planner.wait_for_server(timeout_sec=60) or not runner.wait_for_server(timeout_sec=60):
+        if (args.route_number != 4 and not planner.wait_for_server(timeout_sec=60)) or not runner.wait_for_server(timeout_sec=60):
             raise RuntimeError("Mission action servers unavailable")
-        goal = PlanMission.Goal()
-        goal.implement_side = "both"
-        if args.route_number == 3:
-            goal.start_type = goal.end_type = "depot"
-            goal.start_depot_spot, goal.end_depot_spot = 1, 2
-            goal.start_depot_direction = goal.end_depot_direction = "in"
+        if args.route_number == 4:
+            status["mission_id"] = "injected"
+            status["planned_distance_m"] = route.total_distance_m
         else:
-            goal.start_x, goal.start_y, goal.start_yaw = start.x, start.y, start.yaw
-            goal.end_x, goal.end_y, goal.end_yaw = end.x, end.y, end.yaw
-        planned = wait(planner.send_goal_async(goal), 10)
-        if not planned.accepted:
-            raise RuntimeError("Planning goal rejected")
-        plan_result = wait(planned.get_result_async(), 120)
-        if plan_result.status != GoalStatus.STATUS_SUCCEEDED:
-            raise RuntimeError(f"Planning failed: {plan_result.result.message}")
-        status["mission_id"] = plan_result.result.mission_id
-        status["planned_distance_m"] = plan_result.result.total_distance_m
-        if args.route_number == 3 and abs(plan_result.result.total_distance_m - route.total_distance_m) > 0.1:
-            raise RuntimeError("Planner did not reproduce saved short_route_3")
+            goal = PlanMission.Goal()
+            goal.implement_side = "both"
+            if args.route_number == 3:
+                goal.start_type = goal.end_type = "depot"
+                goal.start_depot_spot, goal.end_depot_spot = 1, 2
+                goal.start_depot_direction = goal.end_depot_direction = "in"
+            else:
+                goal.start_x, goal.start_y, goal.start_yaw = start.x, start.y, start.yaw
+                goal.end_x, goal.end_y, goal.end_yaw = end.x, end.y, end.yaw
+            planned = wait(planner.send_goal_async(goal), 10)
+            if not planned.accepted:
+                raise RuntimeError("Planning goal rejected")
+            plan_result = wait(planned.get_result_async(), 120)
+            if plan_result.status != GoalStatus.STATUS_SUCCEEDED:
+                raise RuntimeError(f"Planning failed: {plan_result.result.message}")
+            status["mission_id"] = plan_result.result.mission_id
+            status["planned_distance_m"] = plan_result.result.total_distance_m
+            if args.route_number == 3 and abs(plan_result.result.total_distance_m - route.total_distance_m) > 0.1:
+                raise RuntimeError("Planner did not reproduce saved short_route_3")
         ready_by = time.monotonic() + 90
         while len(rows) < 10 and time.monotonic() < ready_by:
             time.sleep(0.2)
@@ -204,7 +216,7 @@ def main():
             raise RuntimeError("No tractor odometry received")
         time.sleep(2.0)
         handle = wait(runner.send_goal_async(
-            ExecuteMission.Goal(mission_id=plan_result.result.mission_id),
+            ExecuteMission.Goal(mission_id=status["mission_id"]),
             feedback_callback=feedback), 10)
         if not handle.accepted:
             raise RuntimeError("Execution goal rejected")
@@ -238,9 +250,10 @@ def main():
             fig, ax = plt.subplots(figsize=(9, 4))
             ax.plot([r["station"] for r in rows], [r["cmd"] for r in rows], label="commanded")
             ax.plot([r["station"] for r in rows], [r["speed"] for r in rows], label="actual")
-            for boundary in range(5, math.ceil(route.total_distance_m), 5):
-                ax.axvline(boundary, color="gray", linestyle="--", linewidth=1,
-                           label="section boundary" if boundary == 5 else None)
+            if args.route_number != 4:
+                for boundary in range(5, math.ceil(route.total_distance_m), 5):
+                    ax.axvline(boundary, color="gray", linestyle="--", linewidth=1,
+                               label="section boundary" if boundary == 5 else None)
             for index, (station, _) in enumerate(route_reversals(route)):
                 ax.axvline(station, color="#bd36c5", linestyle=":", linewidth=1.5,
                            label="direction change" if index == 0 else None)

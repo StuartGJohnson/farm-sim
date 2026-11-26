@@ -10,7 +10,7 @@ from shapely.geometry import Point
 from shapely.ops import unary_union
 from shapely.strtree import STRtree
 
-from .graph import _field_driveable
+from .graph import _field_driveable, rs_inside_row_block
 from .model import (FarmMap, FarmTask, PlannerConfig, Route, RouteSegment,
                     RoutingGraph, depot_parking_dividers, parking_spot_polygon)
 from .optimize import TraversalSolution, arc_cost, row_repeat_counts
@@ -117,7 +117,7 @@ def validate_route(route: Route, graph: RoutingGraph, farm: FarmMap,
         if segment.kind == "rs":
             fid = segment.field_id
             region = permitted_fields[fid]
-            hull = tree_hulls[fid]
+            hull = None if rs_inside_row_block(route.task, graph, arc.u, arc.v) else tree_hulls[fid]
             if farm.depot is not None and (graph.vertices[arc.u].field_id is None or
                                            graph.vertices[arc.v].field_id is None):
                 region = region.union(farm.depot).buffer(1e-4)

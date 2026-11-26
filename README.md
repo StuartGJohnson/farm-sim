@@ -905,7 +905,8 @@ on the map. The ROS launch starts one `ground_truth_localization` instance, so
 do not also start its standalone launch file. For a different generated farm,
 pass its directory as `farm:=...` and pass the matching `--world` and
 `--farm-config` paths to the simulator. Keep `ROS_DOMAIN_ID` the same in both
-shells.
+shells. For a Nav2 mission, use the integrated `mapviz:=true` option described
+under [Mapviz and short route missions](#mapviz-and-short-route-missions).
 
 ## Tractor Depot
 
@@ -1282,6 +1283,106 @@ friction sampled near the four wheels was about 0.34–0.42 and estimated
 terrain grade was 3.8% downhill. These are map samples, not measured wheel
 slip or delivered brake force. The full samples and result are in
 [`circular_mission_r2p5_pedals`](debug_out/circular_mission_r2p5_pedals/samples.csv).
+
+### Recording mission movies
+
+`bringup.launch_tractor_physx` can record multiple Isaac Sim camera views at
+once. The follow camera is also the default interactive viewport: it stays
+behind and above the rear axle, tracks its ground-plane position and heading,
+and does not inherit tractor roll or pitch. `--movie-cameras` selects `follow`
+and any cameras enabled on the tractor (for example, `front`). The recorder
+samples at `--movie-fps` frames per **simulated** second (24 by default), at
+`--movie-resolution WIDTH HEIGHT` (1280 × 720 by default). Adjust the follow
+view with `--follow-distance`, `--follow-height`, and `--follow-lead`.
+
+In an Isaac Sim shell configured for the ROS bridge as in the [vehicle control
+example](#physx-vehicle-control-adapter), run:
+
+```bash
+python -m bringup.launch_tractor_physx --ros2 --headless --no-ros-cameras \
+  --world debug_out/farms/farm_seed_1_120m2_depot_outlands_fence/world/farm.usda \
+  --farm-config debug_out/farms/farm_seed_1_120m2_depot_outlands_fence/farm.yaml \
+  --tractor debug_out/tractor_route_2m/tractor.usda \
+  --config configs/tractor_route_2m.yaml \
+  --position 27.56506151938811 101.01610057242215 0.25 --yaw-deg 0 \
+  --movie-output debug_out/missions/short_route_4_demo/depot.mp4 \
+  --movie-cameras follow,front --movie-fps 24 --movie-resolution 1280 720 \
+  --movie-start-on-motion
+```
+
+The output path is a stem: this example writes `depot_follow.mp4`,
+`depot_front.mp4`, and `depot_manifest.json` in the chosen directory. Recording
+starts when ROS control reports motion if `--movie-start-on-motion` is set;
+otherwise it starts immediately. `--no-ros-cameras` omits ROS image topics to
+reduce rendering work but keeps `/clock`, odometry, and movie capture. Omit it
+when ROS camera topics are needed. Stop Isaac Sim with Ctrl-C after the mission;
+it encodes the MP4s during clean shutdown. The recorded frames are temporary,
+and the MP4s and manifest are the files to keep. A recent two-camera example is
+in [the short route 4 mission directory](debug_out/missions/short_route_4_r2p3_v1p5_lookahead_0p8_depot_outlands_fence/).
+
+### Mapviz and short route missions
+
+The autonomy launch now accepts `mapviz:=true` (default `false`). It opens the
+farm-specific Mapviz view in an X11 desktop alongside localization, Nav2, the
+control adapter, and the mission processor. The view uses the farm's offline
+orthophoto tiles and follows the tractor; its generated configuration is saved
+under `<farm>/gis/mapviz.generated.mviz`. Use the same `ROS_DOMAIN_ID` in the
+Isaac Sim and ROS shells. With the simulator above running, launch the mission
+stack from a sourced ROS shell:
+
+```bash
+source activate_venv.sh
+ros2 launch bringup farm_autonomy.launch.py \
+  farm:=debug_out/farms/farm_seed_1_120m2_depot_outlands_fence \
+  tractor_config_path:=configs/tractor_route_2m.yaml \
+  injected_route_path:=debug_out/routes/short/short_route_4_r2p3.json \
+  mission_segmentation_strategy:=by_region \
+  desired_linear_vel_mps:=1.5 rpp_lookahead_m:=0.8 mapviz:=true
+```
+
+For a short route run, start `tools/test_farm_mission_short.py` in another
+sourced ROS shell; it injects the saved `Route` into `mission_executor`:
+
+```bash
+python tools/test_farm_mission_short.py --route-number 4 \
+  --route-path debug_out/routes/short/short_route_4_r2p3.json \
+  --farm debug_out/farms/farm_seed_1_120m2_depot_outlands_fence \
+  --output-dir debug_out/missions/short_route_4_demo
+```
+
+The planner now accepts `FarmTask.tree_ids` to service selected trees, including
+only part of a row; `tree_ids=None` still means all trees in the requested
+fields. The selected IDs must belong to the listed fields. For short route 4,
+`examples/plan_short_route_4.py` selects the eastern half of row R003 in Field
+004, starts eastbound between R003 and R004, and ends westbound in the next lane
+north. Its task specification is equivalent to:
+
+```python
+FarmTask(
+    field_ids=("parcel_003",),
+    implement_side=ImplementSide.BOTH,
+    start=Pose(27.5651, 101.0161, 0.0),
+    end=Pose(27.7709, 106.0119, math.pi),
+    tree_ids=("tree_00380", "tree_00381", "tree_00382", "tree_00383", "tree_00384"),
+)
+```
+
+The planner creates service arcs over the selected span and can connect them
+with field turns. Recreate this route with the 2 m tractor model and a 2.3 m
+planning turn radius:
+
+```bash
+source activate_venv.sh
+python examples/plan_short_route_4.py --turn-radius-m 2.3 \
+  --output-stem debug_out/routes/short/short_route_4_r2p3
+```
+
+The route JSON retains `task.tree_ids`, start and end poses, and route segments.
+See [the planning example](examples/plan_short_route_4.py),
+[the short mission runner](tools/test_farm_mission_short.py), and
+[the selected-tree test](tests/test_selected_tree_route.py) for the complete
+workflow. The earlier depot routes 2 and 3 use the same mission runner; the
+single-path field circle is in [the circular mission runner](tools/test_circular_mission.py).
 
 ## AI assistance
 

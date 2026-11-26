@@ -5,10 +5,12 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from bringup_ros.mapviz_config import farm_map_origin, write_mapviz_config
 from tractor_generation.config import load_tractor_config
 
 
@@ -25,6 +27,26 @@ def tractor_control_node(context):
                  output="screen")]
 
 
+def mapviz_nodes(context):
+    farm = Path(LaunchConfiguration("farm").perform(context)).expanduser().resolve()
+    template = Path(get_package_share_directory("bringup")) / "config" / "tractor.mviz"
+    config = write_mapviz_config(farm, template)
+    latitude, longitude, altitude, heading = farm_map_origin(farm)
+    return [
+        LogInfo(msg=f"Mapviz farm view: {config}"),
+        Node(package="swri_transform_util", executable="initialize_origin.py",
+             name="initialize_origin",
+             parameters=[{"use_sim_time": True,
+                          "local_xy_frame": "map",
+                          "local_xy_origin": "farm",
+                          "local_xy_origins": [latitude, longitude, altitude, heading]}],
+             output="screen"),
+        Node(package="mapviz", executable="mapviz", name="mapviz",
+             parameters=[{"config": str(config), "use_sim_time": True}],
+             output="screen"),
+    ]
+
+
 def generate_launch_description():
     params = str(Path(get_package_share_directory("bringup")) / "config" / "nav2_farm.yaml")
     return LaunchDescription([
@@ -34,12 +56,17 @@ def generate_launch_description():
         DeclareLaunchArgument("overlap_distance_m", default_value="1.0"),
         DeclareLaunchArgument("max_nav_pose_spacing_m", default_value="0.2"),
         DeclareLaunchArgument("desired_linear_vel_mps", default_value="0.5"),
+        DeclareLaunchArgument("rpp_lookahead_m", default_value="0.5"),
         DeclareLaunchArgument("tractor_config_path", default_value="configs/tractor_default.yaml"),
         DeclareLaunchArgument("injected_route_path", default_value=""),
+        DeclareLaunchArgument("mapviz", default_value="false",
+                              description="Open the farm Mapviz view"),
         DeclareLaunchArgument("controller_max_curvature", default_value=""),
         DeclareLaunchArgument("controller_max_steer_angle_rad", default_value=""),
         Node(package="ground_truth_localization", executable="ground_truth_localization_node",
              parameters=[{"use_sim_time": True}], output="screen"),
+        OpaqueFunction(function=mapviz_nodes,
+                       condition=IfCondition(LaunchConfiguration("mapviz"))),
         OpaqueFunction(function=tractor_control_node),
         Node(package="nav2_controller", executable="controller_server",
              parameters=[params, {
@@ -47,6 +74,10 @@ def generate_launch_description():
                      LaunchConfiguration("desired_linear_vel_mps"), value_type=float),
                  "FollowPathReverse.desired_linear_vel": ParameterValue(
                      LaunchConfiguration("desired_linear_vel_mps"), value_type=float),
+                 "FollowPath.lookahead_dist": ParameterValue(
+                     LaunchConfiguration("rpp_lookahead_m"), value_type=float),
+                 "FollowPathReverse.lookahead_dist": ParameterValue(
+                     LaunchConfiguration("rpp_lookahead_m"), value_type=float),
              }], output="screen"),
         Node(package="nav2_lifecycle_manager", executable="lifecycle_manager",
              name="lifecycle_manager_navigation", output="screen",

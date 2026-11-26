@@ -40,6 +40,7 @@ def save_route_json(route: Route, farm: FarmMap, path: str | Path) -> None:
             "field_ids": route.task.field_ids,
             "implement_side": route.task.implement_side.value,
             "implement_range_m": route.task.implement_range_m,
+            "tree_ids": route.task.tree_ids,
             "start_pose": vars(route.task.start),
             "end_pose": vars(route.task.end),
         },
@@ -77,7 +78,8 @@ def load_route_json(path: str | Path) -> Route:
     task_doc = doc["task"]
     task = FarmTask(tuple(task_doc["field_ids"]), ImplementSide(task_doc["implement_side"]),
                     Pose(**task_doc["start_pose"]), Pose(**task_doc["end_pose"]),
-                    task_doc["implement_range_m"])
+                    task_doc["implement_range_m"],
+                    tuple(task_doc["tree_ids"]) if task_doc.get("tree_ids") is not None else None)
     segments = [RouteSegment(s["arc_id"], s["occurrence_index"], s["arc_type"],
                              s["field_id"], tuple(Pose(*p) for p in s["poses"]),
                              s["distance_m"], frozenset(s["service_ids"]),
@@ -127,6 +129,11 @@ def save_route_plot(route: Route, farm: FarmMap, path: str | Path,
         ax.plot(x, y, color="#46b7ee", lw=0.7, alpha=0.65, zorder=3)
     for tree in farm.trees.values():
         ax.plot(tree.x, tree.y, ".", color="#184e1d", markersize=1.8, alpha=0.65, zorder=4)
+    if route.task.tree_ids:
+        selected_trees = [farm.trees[tree_id] for tree_id in route.task.tree_ids]
+        ax.scatter([tree.x for tree in selected_trees],
+                   [tree.y for tree in selected_trees], s=40, marker="o",
+                   facecolor="#ffe658", edgecolor="#3b2500", linewidth=0.8, zorder=9)
     hull_fields = route.task.field_ids
     for hull in tree_concave_hulls(farm, hull_fields).values():
         polygons = (hull.geoms if hull.geom_type == "MultiPolygon" else (hull,))

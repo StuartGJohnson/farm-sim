@@ -85,6 +85,16 @@ def _field_driveable(farm: FarmMap, field_id: str):
     return region
 
 
+def rs_inside_row_block(task: FarmTask, graph: RoutingGraph, u: str, v: str) -> bool:
+    """Whether an RS link may enter row lanes while retaining tree checks."""
+    terminal = u in (graph.start_id, graph.end_id) or v in (graph.start_id, graph.end_id)
+    field_terminal = terminal and (graph.vertices[u].field_id is not None and
+                                   graph.vertices[v].field_id is not None)
+    selected_row_link = (task.tree_ids is not None and
+                         u.startswith("row_state_") and v.startswith("row_state_"))
+    return field_terminal or selected_row_link
+
+
 def _row_candidates(farm: FarmMap, task: FarmTask, config: PlannerConfig,
                     cancel_requested: Callable[[], bool] | None = None):
     offset = task.implement_range_m or infer_implement_range(farm, task.field_ids)
@@ -96,14 +106,31 @@ def _row_candidates(farm: FarmMap, task: FarmTask, config: PlannerConfig,
                       config.tractor_half_width_m) for t in farm.trees.values() if t.field_id == fid]
                       for fid in task.field_ids}
     tree_indices = {fid: STRtree(obstacles) for fid, obstacles in tree_obstacles.items()}
+    selected_tree_ids = set(task.tree_ids) if task.tree_ids is not None else None
     for row in farm.rows.values():
         if cancel_requested and cancel_requested():
             raise InterruptedError("Route graph construction canceled")
         if row.field_id not in task.field_ids:
             continue
+        row_trees = [tree for tree in farm.trees.values() if tree.row_id == row.id
+                     and (selected_tree_ids is None or tree.id in selected_tree_ids)]
+        if selected_tree_ids is not None and not row_trees:
+            continue
         if row.line is None:
             raise ValueError(f"Selected field contains one-tree row {row.id}; no traversal line")
-        a, b = row.line.coords[0], row.line.coords[-1]
+        if selected_tree_ids is None:
+            a, b = row.line.coords[0], row.line.coords[-1]
+        else:
+            stations = [row.line.project(Point(tree.x, tree.y)) for tree in row_trees]
+            first, last = min(stations), max(stations)
+            if last - first < 1.0:
+                first = max(0.0, first - 0.5)
+                last = min(row.line.length, last + 0.5)
+                if last - first < 1.0:
+                    first = max(0.0, last - 1.0)
+                    last = min(row.line.length, first + 1.0)
+            a = row.line.interpolate(first).coords[0]
+            b = row.line.interpolate(last).coords[0]
         dx, dy = b[0] - a[0], b[1] - a[1]
         length = math.hypot(dx, dy)
         if length <= 0:
@@ -112,8 +139,9 @@ def _row_candidates(farm: FarmMap, task: FarmTask, config: PlannerConfig,
         for side, sign in (("L", 1), ("R", -1)):
             # Every tree row has two distinct sides to service. A shared lane
             # can cover facing sides of neighboring rows in one traversal.
-            service_id = f"{row.id}:{side}"
-            requirements.add(service_id)
+            service_ids = ([f"{tree.id}:{side}" for tree in row_trees]
+                           if selected_tree_ids is not None else [f"{row.id}:{side}"])
+            requirements.update(service_ids)
             start = (a[0] + sign * offset * normal[0], a[1] + sign * offset * normal[1])
             end = (b[0] + sign * offset * normal[0], b[1] + sign * offset * normal[1])
             line = LineString([start, end])
@@ -132,7 +160,8 @@ def _row_candidates(farm: FarmMap, task: FarmTask, config: PlannerConfig,
             entry = candidates.setdefault(key, {"field_id": row.field_id,
                                                 "start": start, "end": end,
                                                 "requirements": []})
-            entry["requirements"].append((service_id, start, end, side))
+            entry["requirements"].extend((service_id, start, end, side)
+                                         for service_id in service_ids)
     # Neighboring rows can define the same lane with slightly staggered tree
     # endpoints. Merge strongly overlapping, collinear paths and extend the
     # shared traversal to cover both full row sides. The two outside lanes
@@ -286,6 +315,18 @@ def build_routing_graph(farm: FarmMap, task: FarmTask,
         raise ValueError("Task must list distinct fields")
     if any(field_id not in farm.fields for field_id in task.field_ids):
         raise ValueError("Task names an unknown field")
+    if task.tree_ids is not None:
+        if len(task.tree_ids) != len(set(task.tree_ids)):
+            raise ValueError("Task must list distinct trees")
+        if not task.tree_ids:
+            raise ValueError("Tree selection must not be empty")
+        unknown = set(task.tree_ids) - farm.trees.keys()
+        if unknown:
+            raise ValueError(f"Task names unknown trees: {sorted(unknown)}")
+        outside = [tree_id for tree_id in task.tree_ids
+                   if farm.trees[tree_id].field_id not in task.field_ids]
+        if outside:
+            raise ValueError(f"Selected trees lie outside task fields: {outside}")
     if (config.turn_radius_m <= 0 or config.road_turn_setback_m <= 0 or
             config.rs_step_m <= 0 or config.cost_scale_per_m <= 0 or
             config.reverse_cost_multiplier < 1 or config.gear_change_penalty_m < 0):
@@ -410,17 +451,27 @@ def build_routing_graph(farm: FarmMap, task: FarmTask,
     def is_depot_pose(pose):
         return farm.depot is not None and farm.depot.covers(Point(pose.x, pose.y))
 
+    def field_terminal(pose):
+        point = Point(pose.x, pose.y)
+        if any(road.line.distance(point) <= config.road_pose_tolerance_m
+               for road in farm.roads.values()):
+            return None
+        return next((field_id for field_id in task.field_ids
+                     if _field_driveable(farm, field_id).covers(point)), None)
+
     start_depot = is_depot_pose(task.start)
     end_depot = is_depot_pose(task.end)
-    start_info = None if start_depot else project_terminal(task.start, "start")
-    end_info = None if end_depot else project_terminal(task.end, "end")
+    start_field = None if start_depot else field_terminal(task.start)
+    end_field = None if end_depot else field_terminal(task.end)
+    start_info = None if start_depot or start_field else project_terminal(task.start, "start")
+    end_info = None if end_depot or end_field else project_terminal(task.end, "end")
     closed = (_distance(task.start, task.end) < 1e-5 and
               abs(_wrap(task.start.yaw - task.end.yaw)) < 1e-5)
     graph.start_id = "terminal_start"
     graph.end_id = "terminal_start" if closed else "terminal_end"
-    graph.vertices[graph.start_id] = Vertex(graph.start_id, task.start, True)
+    graph.vertices[graph.start_id] = Vertex(graph.start_id, task.start, True, start_field)
     if not closed:
-        graph.vertices[graph.end_id] = Vertex(graph.end_id, task.end, True)
+        graph.vertices[graph.end_id] = Vertex(graph.end_id, task.end, True, end_field)
 
     def terminal_connection(road, station, tangent, pose, label, outbound):
         sign = 1 if math.cos(_wrap(pose.yaw - tangent)) >= 0 else -1
@@ -649,12 +700,17 @@ def build_routing_graph(farm: FarmMap, task: FarmTask,
         nonlocal rs_counter
         if u == v:
             return
+        if graph.start_id != graph.end_id and (u == graph.end_id or v == graph.start_id):
+            return
         key = (u, v, round(start_pose.yaw, 4), round(end_pose.yaw, 4))
         if key in rs_seen:
             return
         rs_seen.add(key)
         permitted_region = permitted_fields[field_id]
-        hull = tree_hulls[field_id]
+        # A selected-tree task can start, end, and turn between service lanes
+        # inside the row block. These connections still check the full tractor
+        # footprint and every tree; the coarse tree hull cannot apply there.
+        hull = None if rs_inside_row_block(task, graph, u, v) else tree_hulls[field_id]
         if farm.depot is not None and (graph.vertices[u].field_id is None or graph.vertices[v].field_id is None):
             permitted_region = permitted_region.union(farm.depot).buffer(1e-4)
         candidate = rs_connection(start_pose, end_pose, farm.fields[field_id],
@@ -668,7 +724,8 @@ def build_routing_graph(farm: FarmMap, task: FarmTask,
         add_arc(Arc(f"rs_{rs_counter:05d}", u, v, poses, length,
                     "rs", field_id, driving_directions=directions,
                     reverse_distance_m=reverse_m, gear_changes=gear_changes,
-                    reverse_events=reverse_events))
+                    reverse_events=reverse_events,
+                    max_uses=1 if u == graph.start_id or v == graph.end_id else None))
         rs_counter += 1
 
     row_vertices = [v for v in graph.vertices.values() if v.oriented and v.field_id is not None]

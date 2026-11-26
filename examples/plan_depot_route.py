@@ -30,6 +30,12 @@ def main():
                         help="override the route output directory")
     parser.add_argument("--solver-time", type=float,
                         help="override the case's CP-SAT time limit in seconds")
+    parser.add_argument("--rs-candidate-radius", type=float,
+                        help="maximum separation of Reeds-Shepp candidate vertices in metres")
+    parser.add_argument("--tractor-config", type=Path,
+                        help="tractor configuration used for footprint and turning capability")
+    parser.add_argument("--turn-radius-m", type=float,
+                        help="minimum planned turn radius in metres")
     args = parser.parse_args()
     stem = "farm_seed_1_120m2_depot" + ("_outlands" if args.outlands else "")
     farm_dir = Path("debug_out/farms") / stem
@@ -46,8 +52,16 @@ def main():
             continue  # Keep the original, previously reviewed route.
         task = FarmTask(CASES[number], ImplementSide.BOTH,
                         DepotParkingState(1, "in"), DepotParkingState(2, "in"))
+        config_kwargs = {}
+        if args.rs_candidate_radius is not None:
+            config_kwargs["rs_candidate_radius_m"] = args.rs_candidate_radius
+        if args.tractor_config is not None:
+            config_kwargs["tractor_config_path"] = args.tractor_config
+        if args.turn_radius_m is not None:
+            config_kwargs["turn_radius_m"] = args.turn_radius_m
         config = PlannerConfig(solver_time_s=(args.solver_time if args.solver_time is not None
-                                              else {1: 60, 2: 90, 3: 120}[number]))
+                                              else {1: 60, 2: 90, 3: 120}[number]),
+                               **config_kwargs)
         route = (load_route_json(output / f"{stem}.json") if args.reuse_route
                  else plan_route(farm, task, config))
         if not args.reuse_route:
@@ -63,6 +77,8 @@ def main():
             "end_spot": 2,
             "parking_direction": "in",
             "solver_time_limit_s": config.solver_time_s,
+            "tractor_config_path": str(config.tractor_config_path),
+            "turn_radius_m": config.turn_radius_m,
             "rs_candidate_radius_m": config.rs_candidate_radius_m,
             "road_min_split_spacing_m": road_min_split_spacing(farm, config),
             "depot_reverse_cost_multiplier": config.depot_reverse_cost_multiplier,

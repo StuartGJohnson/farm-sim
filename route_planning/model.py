@@ -80,13 +80,14 @@ class ImplementSide(str, Enum):
 
 @dataclass(frozen=True)
 class FarmTask:
-    """Service listed fields in order; an empty tuple requests travel only."""
+    """Service listed fields in order, optionally restricted to named trees."""
 
     field_ids: tuple[str, ...]
     implement_side: ImplementSide
     start: Pose | DepotParkingState
     end: Pose | DepotParkingState
     implement_range_m: Optional[float] = None
+    tree_ids: Optional[tuple[str, ...]] = None
 
 
 @dataclass(frozen=True)
