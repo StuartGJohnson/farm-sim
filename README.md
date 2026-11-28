@@ -1,7 +1,5 @@
-# farm-generator
-Procedural farm generation via intermediate representation for robotics simulations. Tools for conversion to (minimally) IsaacSim/USD.
-
-See `CLAUDE.md` for the full architecture/design reference.
+# farm-sim
+Procedural farm generation via intermediate representation for robotics simulations. Tools for conversion to (minimally) IsaacSim/USD. Farm autonomy stack based on ROS2 and offering basic mission planning and dispatch to nav2. Parameterized tractor generation with variable sensor selection and tractor dimensions.
 
 ## Setup
 
@@ -870,11 +868,11 @@ shells if it differs from the default.
 The system ROS 2 `bringup` package starts Mapviz alongside
 `ground_truth_localization`. Its farm-specific Mapviz configuration uses the
 farm's `gis/map_frame.json` to place the local `map` frame on the offline XYZ
-orthophoto tiles in `gis/tiles/`. It draws `/ground_truth/odom` as a pink arrow
-and `/gps/fix` as a cyan point. The two symbols overlap in the current
-zero-noise simulation, except for any small projection difference. Mapviz
-follows `base_link` as the tractor moves. The generated configuration is saved
-as `<farm>/gis/mapviz.generated.mviz` for inspection.
+orthophoto tiles in `gis/tiles/`. It draws `/ground_truth/odom` as a white arrow
+and `/gps/fix` as a cyan point. The cyan point marks the GPS antenna, about
+1.25 m ahead of the rear-axle `base_link`; the ground-truth arrow marks
+`base_link`. Mapviz follows `base_link` as the tractor moves. The generated
+configuration is saved as `<farm>/gis/mapviz.generated.mviz` for inspection.
 
 ![Mapviz view of the showcase orchard with ground truth and GPS positions](mapviz_render.png)
 
@@ -1339,6 +1337,13 @@ ros2 launch bringup farm_autonomy.launch.py \
   mission_segmentation_strategy:=by_region \
   desired_linear_vel_mps:=1.5 rpp_lookahead_m:=0.8 mapviz:=true
 ```
+
+The mission processor publishes each newly planned or injected full route as
+`nav_msgs/msg/Path` on `/mission/route` and as a bright pink line on
+`/mission/route_marker`. Mapviz displays the line over the orthophoto with the
+white rear-axle arrow and cyan GPS point. Both route topics retain their latest
+message for a Mapviz window opened later. The display uses the route's original
+poses; the mission processor densifies only the sections sent to Nav2.
 
 For a short route run, start `tools/test_farm_mission_short.py` in another
 sourced ROS shell; it injects the saved `Route` into `mission_executor`:

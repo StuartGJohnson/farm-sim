@@ -43,10 +43,15 @@ def test_generated_mapviz_config_uses_farm_georeference_and_tiles(tmp_path):
     tile_config = config["displays"][0]["config"]["custom_sources"][0]
     assert tile_config["base_url"] == (gis / "tiles").as_uri() + "/{level}/{x}/{y}.png"
     assert tile_config["max_zoom"] == 21
+    route_display = config["displays"][1]
+    assert route_display["type"] == "mapviz_plugins/marker"
+    assert route_display["config"]["topic"] == "/mission/route_marker"
+    assert route_display["config"]["qos_durability"] == 1
     assert [(display["config"]["topic"], display["config"]["draw_style"])
-            for display in config["displays"][1:]] == [
+            for display in config["displays"][2:]] == [
                 ("/ground_truth/odom", "arrows"), ("/gps/fix", "points")
             ]
+    assert config["displays"][2]["config"]["color"] == "#ffffff"
 
 
 def test_open_world_map_origin(tmp_path):

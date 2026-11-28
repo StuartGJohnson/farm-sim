@@ -5,7 +5,7 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction, TimerAction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -65,8 +65,6 @@ def generate_launch_description():
         DeclareLaunchArgument("controller_max_steer_angle_rad", default_value=""),
         Node(package="ground_truth_localization", executable="ground_truth_localization_node",
              parameters=[{"use_sim_time": True}], output="screen"),
-        OpaqueFunction(function=mapviz_nodes,
-                       condition=IfCondition(LaunchConfiguration("mapviz"))),
         OpaqueFunction(function=tractor_control_node),
         Node(package="nav2_controller", executable="controller_server",
              parameters=[params, {
@@ -93,4 +91,8 @@ def generate_launch_description():
                           "overlap_distance_m": ParameterValue(LaunchConfiguration("overlap_distance_m"), value_type=float),
                           "max_nav_pose_spacing_m": ParameterValue(LaunchConfiguration("max_nav_pose_spacing_m"), value_type=float)}],
              output="screen"),
+        # The Marker display only subscribes if its topic exists when Mapviz loads.
+        # Give the mission processor time to advertise its retained route marker.
+        TimerAction(period=5.0, actions=[OpaqueFunction(function=mapviz_nodes)],
+                    condition=IfCondition(LaunchConfiguration("mapviz"))),
     ])

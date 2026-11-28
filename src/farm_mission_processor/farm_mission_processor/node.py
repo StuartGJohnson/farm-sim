@@ -9,15 +9,17 @@ from pathlib import Path
 
 import rclpy
 from action_msgs.msg import GoalStatus
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import Point, PoseStamped
 from nav2_msgs.action import FollowPath
 from nav_msgs.msg import Odometry, Path as RosPath
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.task import Future
 from tf2_ros import Buffer, TransformListener, TransformException
+from visualization_msgs.msg import Marker
 
 from farm_mission_interfaces.action import ExecuteMission, PlanMission
 from route_planning import (FarmTask, ImplementSide, PlannerConfig,
@@ -40,6 +42,24 @@ def to_ros_path(node: Node, poses: list[Pose]) -> RosPath:
         stamped.pose.orientation.w = math.cos(pose.yaw / 2)
         path.poses.append(stamped)
     return path
+
+
+def to_route_marker(path: RosPath) -> Marker:
+    """Render every original route edge with one bright, uniform color."""
+    marker = Marker()
+    marker.header = path.header
+    marker.ns = "mission_route"
+    marker.id = 0
+    marker.type = Marker.LINE_STRIP
+    marker.action = Marker.ADD
+    marker.pose.orientation.w = 1.0
+    marker.scale.x = 0.4
+    marker.color.r = 1.0
+    marker.color.b = 1.0
+    marker.color.a = 1.0
+    marker.points = [Point(x=pose.pose.position.x, y=pose.pose.position.y)
+                     for pose in path.poses]
+    return marker
 
 
 def task_from_goal(goal) -> FarmTask:
@@ -78,6 +98,14 @@ class FarmMissionProcessor(Node):
         self._executing = False
         self._speed = math.inf
         self._group = ReentrantCallbackGroup()
+        self._route_publisher = self.create_publisher(
+            RosPath, "/mission/route",
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        self._route_marker_publisher = self.create_publisher(
+            Marker, "/mission/route_marker",
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self._nav = ActionClient(self, FollowPath, "/follow_path", callback_group=self._group)
         self._tf = Buffer()
         self._tf_listener = TransformListener(self._tf, self, spin_thread=False)
@@ -96,10 +124,22 @@ class FarmMissionProcessor(Node):
 
     def inject_route(self, route, mission_id: str = "injected"):
         """Test hook; only call while both action servers are idle."""
+        path = to_ros_path(self, route.continuous_path())
         with self._lock:
             if self._planning or self._executing:
                 raise RuntimeError("Cannot inject a route during a mission")
             self._route, self._mission_id = route, mission_id
+            self._route_publisher.publish(path)
+            self._route_marker_publisher.publish(to_route_marker(path))
+
+    def _install_planned_route(self, route, mission_id: str) -> RosPath:
+        """Store and publish the original route geometry as one snapshot."""
+        path = to_ros_path(self, route.continuous_path())
+        with self._lock:
+            self._route, self._mission_id = route, mission_id
+            self._route_publisher.publish(path)
+            self._route_marker_publisher.publish(to_route_marker(path))
+        return path
 
     def _on_odom(self, message):
         self._speed = abs(message.twist.twist.linear.x)
@@ -166,13 +206,12 @@ class FarmMissionProcessor(Node):
             if goal_handle.is_cancel_requested:
                 raise InterruptedError("Planning canceled")
             mission_id = str(uuid.uuid4())
-            with self._lock:
-                self._route, self._mission_id = route, mission_id
+            path = self._install_planned_route(route, mission_id)
             result.success = True
             result.message = route.optimality_status
             result.mission_id = mission_id
             result.total_distance_m = route.total_distance_m
-            result.path = to_ros_path(self, route.continuous_path())
+            result.path = path
             goal_handle.succeed()
         except InterruptedError as exc:
             result.message = str(exc)

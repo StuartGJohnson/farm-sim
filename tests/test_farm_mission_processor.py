@@ -123,8 +123,10 @@ def test_plan_mission_action_short_route(monkeypatch, tmp_path):
     monkeypatch.setenv("ROS_LOG_DIR", str(tmp_path))
     import rclpy
     from action_msgs.msg import GoalStatus
+    from nav_msgs.msg import Path as RosPath
     from rclpy.action import ActionClient
     from rclpy.executors import MultiThreadedExecutor
+    from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
     from farm_mission_interfaces.action import ExecuteMission, PlanMission
     from farm_mission_processor.node import FarmMissionProcessor
     from route_planning import load_farm_map
@@ -171,9 +173,74 @@ def test_plan_mission_action_short_route(monkeypatch, tmp_path):
         assert outcome.result.total_distance_m == pytest.approx(10, abs=0.05)
         assert len(outcome.result.path.poses) >= 2
         assert node._route is not None
+        published = []
+        client_node.create_subscription(
+            RosPath, "/mission/route", published.append,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                       durability=DurabilityPolicy.TRANSIENT_LOCAL))
+        deadline = time.monotonic() + 5.0
+        while not published and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert published
+        assert published[-1].poses == outcome.result.path.poses
     finally:
         executor.shutdown()
         node.destroy_node()
         client_node.destroy_node()
         rclpy.shutdown()
         thread.join(timeout=5)
+
+
+def test_injected_short_route_4_reaches_late_subscriber(monkeypatch, tmp_path):
+    """The original route is retained once, then replaced when injection changes it."""
+    monkeypatch.setenv("ROS_LOG_DIR", str(tmp_path))
+    import rclpy
+    from nav_msgs.msg import Path as RosPath
+    from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+    from visualization_msgs.msg import Marker
+    from farm_mission_processor.node import FarmMissionProcessor
+
+    route_path = "debug_out/routes/short/short_route_4_r2p3.json"
+    route = load_route_json(route_path)
+    rclpy.init(args=["--ros-args", "-p", f"injected_route_path:={route_path}"])
+    node = FarmMissionProcessor()
+    # The route was injected and published during processor startup.
+    listener = rclpy.create_node("mission_route_late_subscriber")
+    messages = []
+    markers = []
+    qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE,
+                     durability=DurabilityPolicy.TRANSIENT_LOCAL)
+    subscription = listener.create_subscription(RosPath, "/mission/route", messages.append, qos)
+    marker_subscription = listener.create_subscription(
+        Marker, "/mission/route_marker", markers.append, qos)
+
+    def await_messages(count):
+        deadline = time.monotonic() + 5.0
+        while (len(messages) < count or len(markers) < count) and time.monotonic() < deadline:
+            rclpy.spin_once(listener, timeout_sec=0.1)
+        assert len(messages) >= count
+        assert len(markers) >= count
+
+    try:
+        await_messages(1)
+        path = messages[-1]
+        assert path.header.frame_id == "map"
+        assert [(pose.pose.position.x, pose.pose.position.y) for pose in path.poses] == [
+            (pose.x, pose.y) for pose in route.continuous_path()]
+        marker = markers[-1]
+        assert marker.type == Marker.LINE_STRIP
+        assert (marker.color.r, marker.color.g, marker.color.b, marker.color.a) == (1, 0, 1, 1)
+        assert [(point.x, point.y) for point in marker.points] == [
+            (pose.x, pose.y) for pose in route.continuous_path()]
+
+        updated = replace(route, segments=route.segments[:1])
+        node.inject_route(updated, mission_id="short_route_4_updated")
+        await_messages(2)
+        assert len(messages[-1].poses) == len(updated.continuous_path())
+        assert len(markers[-1].points) == len(updated.continuous_path())
+    finally:
+        listener.destroy_subscription(subscription)
+        listener.destroy_subscription(marker_subscription)
+        listener.destroy_node()
+        node.destroy_node()
+        rclpy.shutdown()

@@ -27,13 +27,23 @@ displays:
           max_zoom: 21
       bing_api_key: ""
       source: Farm orthophoto
+  - type: mapviz_plugins/marker
+    name: Mission route
+    config:
+      visible: true
+      collapsed: true
+      topic: /mission/route_marker
+      qos_depth: 1
+      qos_history: 1
+      qos_reliability: 1
+      qos_durability: 1
   - type: mapviz_plugins/odometry
     name: Ground truth
     config:
       visible: true
       collapsed: false
       topic: /ground_truth/odom
-      color: "#ff4d79"
+      color: "#ffffff"
       draw_style: arrows
       show_covariance: false
       position_tolerance: 0
